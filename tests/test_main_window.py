@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication
 
 from app.main_window import MainWindow
 from app.background_editor import BackgroundEditor
+from app.theme import THEMES
 
 
 class MainWindowTests(unittest.TestCase):
@@ -37,7 +38,9 @@ class MainWindowTests(unittest.TestCase):
         (self.folder / "video.mp4").write_bytes(b"video contents")
         self.names = self.root / "names.txt"
         self.names.write_text("Vacation\nCelebration\n", encoding="utf-8")
-        self.window = MainWindow(self.root / "history")
+        self.app_settings = QSettings(str(self.root / "app.ini"), QSettings.IniFormat)
+        with patch("app.main_window.QSettings", return_value=self.app_settings):
+            self.window = MainWindow(self.root / "history")
         self.window.names_input.setText(str(self.names))
         self.window.folder_input.setText(str(self.folder))
 
@@ -115,6 +118,114 @@ class MainWindowTests(unittest.TestCase):
         self.assertLessEqual(self.window.centralWidget().minimumSizeHint().width(), 740)
         for widget in self.window.input_widgets:
             self.assertGreaterEqual(widget.width(), widget.minimumSizeHint().width())
+
+    def test_glass_settings_scroll_only_when_needed_and_keep_actions_visible(self):
+        self.window.mode_tabs.setCurrentIndex(1)
+        panel = self.window.converter
+        panel.operation_combo.setCurrentText("Add background")
+        self.window.resize(1160, 800)
+        self.window.show()
+        for _ in range(3):
+            self.app.processEvents()
+        self.assertEqual(panel.settings_scroll.verticalScrollBar().maximum(), 0)
+        self.window.resize(740, 600)
+        for _ in range(3):
+            self.app.processEvents()
+        self.assertGreater(panel.settings_scroll.verticalScrollBar().maximum(), 0)
+        self.assertGreaterEqual(panel.table.height(), 102)
+        self.assertLess(panel.settings_scroll.geometry().bottom(), panel.count_label.y())
+        self.assertLess(panel.count_label.geometry().bottom(), panel.table.y())
+        self.assertLess(panel.table.geometry().bottom(), panel.status_label.y())
+        self.assertLessEqual(panel.convert_button.geometry().bottom(), panel.height())
+        scrollbar = panel.settings_scroll.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+        self.app.processEvents()
+        self.assertLess(panel.background_editor.geometry().bottom() - scrollbar.value(),
+                        panel.settings_scroll.viewport().height())
+
+    def test_glass_checkbox_states_and_control_icon_resources_render(self):
+        self.window.show()
+        self.app.processEvents()
+        unchecked = self.window.recursive_check.grab().toImage()
+        self.window.recursive_check.setChecked(True)
+        self.app.processEvents()
+        self.assertNotEqual(unchecked, self.window.recursive_check.grab().toImage())
+        for name in ("arrow-down-16.png", "arrow-up-16.png", "standardbutton-apply-16.png"):
+            self.assertFalse(QIcon(f":/qt-project.org/styles/commonstyle/images/{name}").isNull())
+
+    def test_theme_choice_is_saved_and_restored(self):
+        self.assertEqual(self.window.theme, "Dark")
+        self.window.theme_combo.setCurrentText("Light")
+        self.assertEqual(self.window.workspace.theme, "Light")
+        self.app_settings.sync()
+        restored_settings = QSettings(str(self.root / "app.ini"), QSettings.IniFormat)
+        with patch("app.main_window.QSettings", return_value=restored_settings):
+            restored = MainWindow(self.root / "restored-history")
+        try:
+            self.assertEqual(restored.theme, "Light")
+            self.assertEqual(restored.theme_combo.currentText(), "Light")
+            self.assertEqual(restored.palette().color(restored.palette().ColorRole.WindowText).name(),
+                             THEMES["Light"]["text"])
+        finally:
+            restored.close()
+            restored.deleteLater()
+            self.app.sendPostedEvents(None, QEvent.DeferredDelete)
+
+    def test_theme_switch_keeps_plans_and_updates_status_contrast(self):
+        self.window.preview()
+        self.wait_for_task()
+        rename_plan = self.window.plan
+        Image.new("RGBA", (60, 30), (0, 0, 0, 0)).save(self.folder / "cutout.png")
+        panel = self.window.converter
+        panel.folder_input.setText(str(self.folder))
+        panel.output_input.setText(str(self.root / "converted"))
+        panel.input_combo.setCurrentText("PNG")
+        panel.operation_combo.setCurrentText("Add background")
+        panel.background_editor.mode_combo.setCurrentText("Random radial gradient")
+        panel.preview()
+        self.wait_for_task(panel)
+        conversion_plan = panel.plan
+        preview = panel.table.item(0, 0).icon().pixmap(48, 48).toImage()
+        for theme in ("Light", "Dark"):
+            self.window.theme_combo.setCurrentText(theme)
+            self.app.processEvents()
+            self.assertIs(self.window.plan, rename_plan)
+            self.assertIs(panel.plan, conversion_plan)
+            self.assertTrue(self.window.rename_button.isEnabled())
+            self.assertTrue(panel.convert_button.isEnabled())
+            self.assertEqual(self.window.table.item(0, 4).foreground().color().name(), THEMES[theme]["success"])
+            self.assertEqual(panel.table.item(0, 3).foreground().color().name(), THEMES[theme]["success"])
+            self.assertEqual(preview, panel.table.item(0, 0).icon().pixmap(48, 48).toImage())
+
+    def test_invalid_saved_theme_falls_back_to_dark(self):
+        self.app_settings.setValue("appearance", "Unknown")
+        with patch("app.main_window.QSettings", return_value=self.app_settings):
+            restored = MainWindow(self.root / "fallback-history")
+        try:
+            self.assertEqual(restored.theme, "Dark")
+            self.assertEqual(restored.theme_combo.currentText(), "Dark")
+        finally:
+            restored.close()
+            restored.deleteLater()
+            self.app.sendPostedEvents(None, QEvent.DeferredDelete)
+
+    def test_both_themes_fit_compact_and_wide_windows(self):
+        panel = self.window.converter
+        panel.operation_combo.setCurrentText("Add background")
+        self.window.mode_tabs.setCurrentIndex(1)
+        self.window.show()
+        for theme in THEMES:
+            self.window.theme_combo.setCurrentText(theme)
+            for width, height in ((740, 600), (2560, 1440)):
+                self.window.resize(width, height)
+                for _ in range(3):
+                    self.app.processEvents()
+                corner = self.window.mode_tabs.cornerWidget()
+                self.assertLessEqual(corner.width(), 250)
+                self.assertLessEqual(panel.settings_scroll.widget().width(), 1120)
+                self.assertLessEqual(panel.convert_button.geometry().bottom(), panel.height())
+                self.assertGreaterEqual(panel.table.height(), 102)
+                self.assertGreaterEqual(self.window.theme_combo.height(), 30)
 
     def test_conversion_preview_and_batch_through_worker(self):
         image = self.folder / "photo.jpg"

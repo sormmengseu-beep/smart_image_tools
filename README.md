@@ -4,6 +4,12 @@ A local Python desktop app for batch renaming files from TXT or CSV names and
 converting images in batches. No API key is needed. Background removal downloads
 its model on first use; subsequent runs can use the cached model offline.
 
+## Appearance
+
+Use the **Theme** selector at the top right to switch between **Dark** and
+**Light**. The app remembers your choice on restart. Theme changes keep the
+current batch preview, image colors, and conversion settings unchanged.
+
 ## Workflow
 
 1. In **Rename files**, click **Load names** and select a TXT file with one new filename per line.

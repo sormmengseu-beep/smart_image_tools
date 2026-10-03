@@ -3,10 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QSettings, QStandardPaths, QThread, QUrl
-from PySide6.QtGui import QCloseEvent, QDesktopServices, QColor
+from PySide6.QtCore import QSettings, QSize, QStandardPaths, QThread, Qt, QUrl
+from PySide6.QtGui import QCloseEvent, QDesktopServices, QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QGridLayout,
+    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
     QProgressBar, QPushButton, QStyle, QTableWidget, QTableWidgetItem,
     QTabWidget, QVBoxLayout, QWidget,
@@ -14,6 +14,9 @@ from PySide6.QtWidgets import (
 
 from app.workers import TaskWorker
 from app.conversion_panel import ConversionPanel
+from app.theme import (
+    THEMES, GlassWorkspace, refresh_status_colors, style_status, theme_palette, theme_stylesheet,
+)
 from services.renamer import (
     FILE_TYPES, RenamePlan, RenameService, build_mapped_plan, build_plan,
     display_time, export_mapping, load_names, scan_files,
@@ -24,6 +27,9 @@ class MainWindow(QMainWindow):
     def __init__(self, history_folder: Path | None = None) -> None:
         super().__init__()
         self.settings = QSettings("SmartFileRenamer", "SmartFileRenamer")
+        saved_theme = self.settings.value("appearance", "Dark")
+        self.theme = saved_theme if isinstance(saved_theme, str) and saved_theme in THEMES else "Dark"
+        self.setProperty("appearance", self.theme)
         self.service = RenameService(history_folder or Path(
             QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
         ) / "history")
@@ -32,23 +38,29 @@ class MainWindow(QMainWindow):
         self.worker: TaskWorker | None = None
         self.busy = False
         self.setWindowTitle("Smart File Renamer")
-        self.resize(1100, 740)
+        self.setFont(QFont("Segoe UI", 10))
+        self.setPalette(theme_palette(self.theme))
+        self.setWindowIcon(self.style().standardIcon(QStyle.SP_FileDialogContentsView))
+        self.resize(1160, 800)
         self.setMinimumSize(740, 600)
+        self.setStyleSheet(theme_stylesheet(self.theme))
         self._build_ui()
         self._update_actions()
 
     def _button(self, text: str, icon: QStyle.StandardPixmap, callback: Callable) -> QPushButton:
         button = QPushButton(self.style().standardIcon(icon), text)
+        button.setToolTip(text)
+        button.setCursor(Qt.PointingHandCursor)
         button.clicked.connect(callback)
         return button
 
     def _build_ui(self) -> None:
         root = QWidget()
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(16)
+        layout.setContentsMargins(20, 14, 20, 14)
+        layout.setSpacing(10)
         heading = QHBoxLayout()
-        title = QLabel("Smart File Renamer")
+        title = QLabel("Rename files")
         title.setObjectName("title")
         heading.addWidget(title)
         heading.addStretch()
@@ -105,7 +117,11 @@ class MainWindow(QMainWindow):
         options.setColumnStretch(3, 1)
         self.preview_button = self._button("Preview", QStyle.SP_BrowserReload, self.preview)
         options.addWidget(self.preview_button, 0, 4)
-        layout.addLayout(options)
+        options_content = QWidget()
+        options_content.setMaximumWidth(940)
+        options.setContentsMargins(0, 0, 0, 0)
+        options_content.setLayout(options)
+        layout.addWidget(options_content)
 
         summary = QHBoxLayout()
         self.count_label = QLabel("0 files  |  0 names  |  0 changes")
@@ -122,10 +138,12 @@ class MainWindow(QMainWindow):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
         self.table.setWordWrap(False)
         self.table.verticalHeader().hide()
-        self.table.verticalHeader().setDefaultSectionSize(34)
+        self.table.verticalHeader().setDefaultSectionSize(40)
         header = self.table.horizontalHeader()
+        header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         header.setSectionResizeMode(0, QHeaderView.Fixed)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.Stretch)
@@ -144,6 +162,7 @@ class MainWindow(QMainWindow):
         self.progress.hide()
         layout.addWidget(self.progress)
         self.status_label = QLabel("No folder selected")
+        self.status_label.setObjectName("status")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
@@ -160,11 +179,50 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.rename_button)
         layout.addLayout(actions)
         self.mode_tabs = QTabWidget()
-        self.converter = ConversionPanel()
-        self.mode_tabs.addTab(root, "Rename files")
-        self.mode_tabs.addTab(self.converter, "Image tools")
+        self.mode_tabs.setDocumentMode(True)
+        self.mode_tabs.setIconSize(QSize(16, 16))
+        self.converter = ConversionPanel(self)
+        self.mode_tabs.addTab(root, self.style().standardIcon(QStyle.SP_FileDialogDetailedView), "Rename files")
+        self.mode_tabs.addTab(self.converter, self.style().standardIcon(QStyle.SP_FileDialogContentsView), "Image tools")
         self.converter.busy_changed.connect(self._tab_busy)
-        self.setCentralWidget(self.mode_tabs)
+        self.workspace = GlassWorkspace()
+        self.workspace.set_theme(self.theme)
+        shell_layout = QVBoxLayout(self.workspace)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+        app_header = QFrame()
+        app_header.setObjectName("appHeader")
+        brand_layout = QHBoxLayout(app_header)
+        brand_layout.setContentsMargins(20, 8, 20, 8)
+        brand_layout.setSpacing(10)
+        mark = QLabel()
+        mark.setFixedSize(26, 26)
+        mark.setPixmap(self.windowIcon().pixmap(24, 24))
+        brand = QLabel("Smart File Renamer")
+        brand.setObjectName("brand")
+        brand_layout.addWidget(mark)
+        brand_layout.addWidget(brand)
+        brand_layout.addStretch()
+        self.mode_tabs.setCornerWidget(app_header, Qt.TopLeftCorner)
+        theme_controls = QFrame()
+        theme_controls.setObjectName("themeControls")
+        theme_layout = QHBoxLayout(theme_controls)
+        theme_layout.setContentsMargins(12, 4, 16, 4)
+        theme_layout.setSpacing(8)
+        theme_label = QLabel("Theme")
+        self.theme_combo = QComboBox()
+        self.theme_combo.setAccessibleName("Color theme")
+        self.theme_combo.setToolTip("Color theme")
+        self.theme_combo.addItems(THEMES)
+        self.theme_combo.setCurrentText(self.theme)
+        self.theme_combo.setFixedWidth(96)
+        theme_label.setBuddy(self.theme_combo)
+        theme_layout.addWidget(theme_label)
+        theme_layout.addWidget(self.theme_combo)
+        self.mode_tabs.setCornerWidget(theme_controls, Qt.TopRightCorner)
+        self.theme_combo.currentTextChanged.connect(self._apply_theme)
+        shell_layout.addWidget(self.mode_tabs, 1)
+        self.setCentralWidget(self.workspace)
         self.input_widgets = [self.names_button, self.folder_button, self.preview_button,
                               self.type_combo, self.order_combo, self.date_combo,
                               self.recursive_check, self.extension_check]
@@ -172,35 +230,20 @@ class MainWindow(QMainWindow):
             combo.currentIndexChanged.connect(self._invalidate_preview)
         for check in (self.recursive_check, self.extension_check):
             check.toggled.connect(self._invalidate_preview)
-        self.setStyleSheet("""
-            QWidget { background: #f5f6f8; color: #25272b; font-size: 13px; }
-            QLabel#title { font-size: 24px; font-weight: 700; }
-            QLabel#counts { font-weight: 600; }
-            QLabel#errors { color: #bb3845; font-weight: 600; }
-            QLineEdit, QComboBox, QSpinBox {
-                background: #ffffff; border: 1px solid #cbd0d7;
-                border-radius: 4px; padding: 8px;
-            }
-            QPushButton {
-                background: #ffffff; border: 1px solid #cbd0d7; border-radius: 4px;
-                padding: 8px 12px; font-weight: 600;
-            }
-            QPushButton:hover { background: #eaf0f4; border-color: #8499ab; }
-            QPushButton:disabled { color: #89919b; background: #edf0f3; }
-            QPushButton#primary { color: #ffffff; background: #18765b; border-color: #18765b; }
-            QPushButton#primary:disabled { color: #89919b; background: #edf0f3; border-color: #cbd0d7; }
-            QTableWidget {
-                background: #ffffff; alternate-background-color: #f6f8fa;
-                border: 1px solid #cbd0d7; gridline-color: #e6e9ee;
-                selection-background-color: #dceaf6; selection-color: #25272b;
-            }
-            QHeaderView::section {
-                background: #e9edf2; padding: 8px; border: 0;
-                border-bottom: 1px solid #cbd0d7; font-weight: 600;
-            }
-            QProgressBar { border: 0; background: #e2e6eb; }
-            QProgressBar::chunk { background: #18765b; }
-        """)
+
+    def _apply_theme(self, theme: str) -> None:
+        if theme not in THEMES:
+            return
+        self.theme = theme
+        self.setProperty("appearance", theme)
+        self.setPalette(theme_palette(theme))
+        self.setStyleSheet(theme_stylesheet(theme))
+        self.workspace.set_theme(theme)
+        refresh_status_colors(self.table)
+        refresh_status_colors(self.converter.table)
+        self.converter.background_editor._refresh()
+        self.converter._update_background()
+        self.settings.setValue("appearance", theme)
 
     def _update_actions(self) -> None:
         self.rename_button.setEnabled(not self.busy and bool(self.plan and self.plan.ready)
@@ -289,7 +332,7 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 item.setToolTip(value)
                 if column == 4:
-                    item.setForeground(QColor("#bb3845" if entry.error else "#18765b" if entry.changed else "#717883"))
+                    style_status(self.table, item, "error" if entry.error else "success" if entry.changed else "muted")
                 self.table.setItem(row, column, item)
         self.count_label.setText(
             f"{len(plan.entries)} files  |  {plan.names_count} names  |  {len(plan.changes)} changes"

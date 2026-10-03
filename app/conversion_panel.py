@@ -5,17 +5,18 @@ from dataclasses import replace
 from threading import Event
 from typing import Callable
 
-from PySide6.QtCore import QSettings, QSize, QThread, Signal
-from PySide6.QtGui import QColor, QIcon, QPixmap
+from PySide6.QtCore import QSettings, QSize, QThread, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QFileDialog,
-    QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
-    QProgressBar, QPushButton, QSpinBox, QStyle, QTableWidget, QTableWidgetItem,
+    QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
+    QProgressBar, QPushButton, QSizePolicy, QSpinBox, QStyle, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
 from app.workers import TaskWorker
 from app.background_editor import BackgroundEditor
+from app.theme import SettingsScrollArea, style_status
 from services.converter import (
     INPUT_FORMATS, OUTPUT_FORMATS, ConversionOptions, ConversionPlan,
     ConversionResult, build_conversion_plan, convert_batch, recolor_plan,
@@ -25,8 +26,8 @@ from services.converter import (
 class ConversionPanel(QWidget):
     busy_changed = Signal(bool)
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
         self.settings = QSettings("SmartFileRenamer", "SmartFileRenamer")
         self.plan: ConversionPlan | None = None
         self.busy = False
@@ -38,16 +39,23 @@ class ConversionPanel(QWidget):
 
     def _button(self, text: str, icon: QStyle.StandardPixmap, callback: Callable) -> QPushButton:
         button = QPushButton(self.style().standardIcon(icon), text)
+        button.setToolTip(text)
+        button.setCursor(Qt.PointingHandCursor)
         button.clicked.connect(callback)
         return button
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 8, 24, 8)
-        layout.setSpacing(4)
-        title = QLabel("Batch Image Tools")
+        layout.setContentsMargins(20, 12, 20, 12)
+        layout.setSpacing(6)
+        settings_content = QWidget()
+        settings_content.setMaximumWidth(1120)
+        settings_layout = QVBoxLayout(settings_content)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
+        settings_layout.setSpacing(6)
+        title = QLabel("Image tools")
         title.setObjectName("title")
-        layout.addWidget(title)
+        settings_layout.addWidget(title)
         paths = QGridLayout()
         self.folder_input = QLineEdit()
         self.folder_input.setReadOnly(True)
@@ -65,7 +73,7 @@ class ConversionPanel(QWidget):
             paths.addWidget(field, row, 1)
             paths.addWidget(button, row, 2)
         paths.setColumnStretch(1, 1)
-        layout.addLayout(paths)
+        settings_layout.addLayout(paths)
 
         options = QGridLayout()
         options.setHorizontalSpacing(12)
@@ -116,10 +124,19 @@ class ConversionPanel(QWidget):
         options.addWidget(self.preview_button, 2, 5)
         options.setColumnStretch(1, 1)
         options.setColumnStretch(3, 1)
-        layout.addLayout(options)
+        settings_layout.addLayout(options)
         self.background_editor = BackgroundEditor(self.settings)
         self.background_editor.changed.connect(self._background_changed)
-        layout.addWidget(self.background_editor)
+        settings_layout.addWidget(self.background_editor)
+        self.settings_scroll = SettingsScrollArea()
+        self.settings_scroll.setFrameShape(QFrame.NoFrame)
+        self.settings_scroll.setWidgetResizable(True)
+        self.settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.settings_scroll.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.settings_scroll.setMinimumHeight(180)
+        self.settings_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.settings_scroll.setWidget(settings_content)
+        layout.addWidget(self.settings_scroll)
 
         self.count_label = QLabel("0 images")
         self.count_label.setObjectName("counts")
@@ -129,12 +146,14 @@ class ConversionPanel(QWidget):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
         self.table.setWordWrap(False)
         self.table.setIconSize(QSize(48, 48))
         self.table.itemSelectionChanged.connect(self._preview_selection)
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(60)
         header = self.table.horizontalHeader()
+        header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.Fixed)
         header.setSectionResizeMode(2, QHeaderView.Stretch)
@@ -150,6 +169,7 @@ class ConversionPanel(QWidget):
         self.progress.hide()
         layout.addWidget(self.progress)
         self.status_label = QLabel("No source folder selected")
+        self.status_label.setObjectName("status")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
         actions = QHBoxLayout()
@@ -183,7 +203,7 @@ class ConversionPanel(QWidget):
 
     def _update_background(self) -> None:
         self.background_button.setStyleSheet(
-            f"background: {self.background}; border: 1px solid #a0a7af; border-radius: 3px;"
+            f"background: {self.background}; border: 1px solid {self.palette().color(QPalette.Mid).name()}; border-radius: 4px;"
         )
 
     def choose_background(self) -> None:
@@ -246,6 +266,8 @@ class ConversionPanel(QWidget):
         adding = self.operation_combo.currentText() == "Add background"
         self.background_editor.setVisible(adding)
         self.remove_existing_check.setVisible(adding)
+        if not adding:
+            self.remove_existing_check.adjustSize()
         self.format_combo.setEnabled(not self.busy and not removing)
         self.quality_spin.setEnabled(not self.busy and not removing
                                      and self.format_combo.currentText() in {"JPG", "WebP", "AVIF"})
@@ -253,6 +275,7 @@ class ConversionPanel(QWidget):
                                           and self.format_combo.currentText() in {"JPG", "BMP"})
         self.convert_button.setText("Add backgrounds" if adding else
                                     "Remove backgrounds" if removing else "Convert images")
+        self.settings_scroll.updateGeometry()
 
     def _preview_selection(self) -> None:
         row = self.table.currentRow()
@@ -323,7 +346,7 @@ class ConversionPanel(QWidget):
                     icon.addPixmap(pixmap, QIcon.Selected)
                     item.setIcon(icon)
                 if column == 3:
-                    item.setForeground(QColor("#bb3845" if entry.error else "#18765b"))
+                    style_status(self.table, item, "error" if entry.error else "success")
                 self.table.setItem(row, column, item)
         self.status_label.setText(" ".join(plan.errors) or
                                   ("Resolve preview errors" if errors else
@@ -353,7 +376,7 @@ class ConversionPanel(QWidget):
                 item.setText(status)
                 item.setToolTip(status)
                 if entry.source in result.errors:
-                    item.setForeground(QColor("#bb3845"))
+                    style_status(self.table, item, "error")
         self.plan = None
         prefix = "Cancelled. " if result.cancelled else ""
         action = ("Added backgrounds to" if self.operation_combo.currentText() == "Add background" else

@@ -6,7 +6,7 @@ import secrets
 
 from PIL import Image
 from PySide6.QtCore import QSettings, Qt, Signal
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtGui import QColor, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QColorDialog, QComboBox, QGridLayout, QHBoxLayout, QInputDialog,
     QLabel, QMessageBox, QPushButton, QSpinBox, QStyle, QWidget,
@@ -56,7 +56,7 @@ class BackgroundEditor(QWidget):
         self.saved_presets = self._load_presets()
         layout = QGridLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setHorizontalSpacing(12)
+        layout.setHorizontalSpacing(8)
         layout.setVerticalSpacing(4)
         self.setMinimumHeight(128)
         self.mode_combo = QComboBox()
@@ -75,6 +75,7 @@ class BackgroundEditor(QWidget):
         self.end_button = QPushButton()
         for button in (self.start_button, self.end_button):
             button.setFixedSize(32, 32)
+            button.setCursor(Qt.PointingHandCursor)
         self.start_button.clicked.connect(lambda: self.choose_color(False))
         self.end_button.clicked.connect(lambda: self.choose_color(True))
         self.swap_button = self._icon_button(QStyle.SP_BrowserReload, "Swap gradient colors")
@@ -120,6 +121,7 @@ class BackgroundEditor(QWidget):
         self.preview_label = QLabel()
         self.preview_label.setFixedSize(112, 48)
         self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setObjectName("backgroundPreview")
         self.preview_label.setToolTip("Background preview")
         layout.addWidget(QLabel("Style"), 0, 0)
         layout.addWidget(self.mode_combo, 0, 1)
@@ -153,6 +155,7 @@ class BackgroundEditor(QWidget):
         button.setFixedSize(32, 32)
         button.setStyleSheet("padding: 0;")
         button.setToolTip(tooltip)
+        button.setCursor(Qt.PointingHandCursor)
         return button
 
     def _load_presets(self) -> dict:
@@ -227,7 +230,8 @@ class BackgroundEditor(QWidget):
         end_label = "Random color for this image" if randomized else "End color"
         for button, color, label in ((self.start_button, start, start_label),
                                      (self.end_button, end, end_label)):
-            button.setStyleSheet(f"background: {color}; border: 1px solid #a0a7af; border-radius: 3px; padding: 0;")
+            border = self.palette().color(QPalette.Mid).name()
+            button.setStyleSheet(f"background: {color}; border: 2px solid {border}; border-radius: 5px; padding: 0;")
             button.setToolTip(f"{label}: {color}")
         self.preview_label.setToolTip(f"{options.background_mode}: {options.background} / "
                                       f"{options.background_end}\n{options.gradient_description}")
