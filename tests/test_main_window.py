@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,11 +11,12 @@ from PIL import Image
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEventLoop, QTimer
-from PySide6.QtGui import QFontDatabase
+from PySide6.QtCore import QEvent, QEventLoop, QSettings, QTimer
+from PySide6.QtGui import QColor, QFontDatabase, QIcon
 from PySide6.QtWidgets import QApplication
 
 from app.main_window import MainWindow
+from app.background_editor import BackgroundEditor
 
 
 class MainWindowTests(unittest.TestCase):
@@ -45,6 +47,8 @@ class MainWindowTests(unittest.TestCase):
         if self.window.converter.busy:
             self.wait_for_task(self.window.converter)
         self.window.close()
+        self.window.deleteLater()
+        self.app.sendPostedEvents(None, QEvent.DeferredDelete)
         self.app.processEvents()
         self.temporary.cleanup()
 
@@ -154,6 +158,196 @@ class MainWindowTests(unittest.TestCase):
             minimum = (widget.minimumWidth() if widget.minimumWidth() == widget.maximumWidth()
                        else widget.minimumSizeHint().width())
             self.assertGreaterEqual(widget.width(), minimum)
+
+    def test_add_background_batch_and_palette_change_invalidates_preview(self):
+        Image.new("RGBA", (60, 30), (255, 0, 0, 0)).save(self.folder / "cutout.png")
+        panel = self.window.converter
+        panel.folder_input.setText(str(self.folder))
+        panel.output_input.setText(str(self.folder / "colored"))
+        panel.operation_combo.setCurrentText("Add background")
+        panel.input_combo.setCurrentText("PNG")
+        panel.format_combo.setCurrentText("PNG")
+        editor = panel.background_editor
+        editor.preset_combo.setCurrentText("Sky")
+        editor.apply_preset()
+        panel.preview()
+        self.wait_for_task(panel)
+        self.assertTrue(panel.convert_button.isEnabled())
+        self.assertEqual(panel.plan.options.background_mode, "Linear gradient")
+        editor.swap_colors()
+        self.assertIsNone(panel.plan)
+        self.assertFalse(panel.convert_button.isEnabled())
+        panel.preview()
+        self.wait_for_task(panel)
+        panel.convert()
+        self.wait_for_task(panel)
+        self.assertEqual(panel.status_label.text(), "Added backgrounds to 1 images; 0 errors")
+        self.assertEqual(panel.table.item(0, 3).text(), "Background added")
+        with Image.open(self.folder / "colored/cutout.png") as output:
+            self.assertEqual(output.getchannel("A").getextrema(), (255, 255))
+            self.assertNotEqual(output.getpixel((0, 0)), output.getpixel((0, 29)))
+
+    def test_background_presets_survive_restart_and_can_be_deleted(self):
+        settings = QSettings(str(self.root / "settings.ini"), QSettings.IniFormat)
+        editor = BackgroundEditor(settings)
+        editor.setParent(self.window)
+        editor.preset_combo.setCurrentText("Sunset")
+        editor.apply_preset()
+        with patch("app.background_editor.QInputDialog.getText", return_value=("My palette", True)):
+            editor.save_preset()
+        settings.sync()
+        restored = BackgroundEditor(QSettings(str(self.root / "settings.ini"), QSettings.IniFormat))
+        restored.setParent(self.window)
+        restored.preset_combo.setCurrentText("My palette")
+        restored.apply_preset()
+        self.assertEqual(restored.options(), editor.options())
+        self.assertTrue(restored.delete_button.isEnabled())
+        restored.delete_preset()
+        self.assertNotIn("My palette", restored.saved_presets)
+        restored.settings.sync()
+        reloaded = BackgroundEditor(settings)
+        reloaded.setParent(self.window)
+        self.assertNotIn("My palette", reloaded.saved_presets)
+
+    def test_random_background_custom_canvas_batch_and_shuffle_invalidation(self):
+        for name in ("one.png", "two.png"):
+            Image.new("RGBA", (60, 30), (0, 0, 0, 0)).save(self.folder / name)
+        panel = self.window.converter
+        panel.folder_input.setText(str(self.folder))
+        panel.output_input.setText(str(self.folder / "randomized"))
+        panel.operation_combo.setCurrentText("Add background")
+        panel.input_combo.setCurrentText("PNG")
+        panel.format_combo.setCurrentText("PNG")
+        editor = panel.background_editor
+        editor.canvas_combo.setCurrentText("Custom")
+        editor.width_spin.setValue(90)
+        editor.height_spin.setValue(60)
+        editor.mode_combo.setCurrentText("Random radial gradient")
+        self.assertTrue(editor.shuffle_button.isEnabled())
+        self.assertTrue(editor.start_button.isEnabled())
+        self.assertFalse(editor.end_button.isEnabled())
+        with patch("app.background_editor.QColorDialog.getColor", return_value=QColor("#663399")):
+            editor.start_button.click()
+        panel.preview()
+        self.wait_for_task(panel)
+        self.assertTrue(panel.convert_button.isEnabled())
+        first_options = panel.plan.entries[0].options
+        self.assertEqual(first_options.background_mode, "Radial gradient")
+        self.assertEqual(panel.table.item(0, 1).text(), "90 x 60")
+        self.assertEqual(panel.table.horizontalHeaderItem(0).text(), "Image preview")
+        for row, entry in enumerate(panel.plan.entries):
+            self.assertEqual(entry.options.background, "#663399")
+            with Image.open(io.BytesIO(entry.preview_thumbnail)) as preview:
+                icon = panel.table.item(row, 0).icon()
+                for mode in (QIcon.Normal, QIcon.Selected):
+                    displayed = icon.pixmap(56, 56, mode).toImage()
+                    self.assertEqual(displayed.pixelColor(0, 0).getRgb(), preview.getpixel((0, 0)))
+        panel.table.setCurrentCell(1, 0)
+        self.assertEqual(editor.preview_options, panel.plan.entries[1].options)
+        editor.shuffle_backgrounds()
+        self.assertIsNone(panel.plan)
+        self.assertFalse(panel.convert_button.isEnabled())
+        panel.preview()
+        self.wait_for_task(panel)
+        shuffled_options = panel.plan.entries[0].options
+        self.assertEqual(first_options.background, shuffled_options.background)
+        self.assertNotEqual(first_options.background_end, shuffled_options.background_end)
+        self.assertEqual(first_options.gradient_center, shuffled_options.gradient_center)
+        panel.convert()
+        self.wait_for_task(panel)
+        self.assertEqual(panel.status_label.text(), "Added backgrounds to 2 images; 0 errors")
+        with Image.open(self.folder / "randomized/one.png") as output:
+            self.assertEqual(output.size, (90, 60))
+            self.assertEqual(output.getchannel("A").getextrema(), (255, 255))
+
+    def test_changing_shared_radial_color_updates_rows_and_export_without_preview(self):
+        for name in ("one.png", "two.png", "three.png"):
+            Image.new("RGBA", (256, 256), (0, 0, 0, 0)).save(self.folder / name)
+        panel = self.window.converter
+        panel.folder_input.setText(str(self.folder))
+        panel.output_input.setText(str(self.folder / "recolored"))
+        panel.operation_combo.setCurrentText("Add background")
+        panel.input_combo.setCurrentText("PNG")
+        panel.format_combo.setCurrentText("PNG")
+        editor = panel.background_editor
+        editor.mode_combo.setCurrentText("Random radial gradient")
+        panel.preview()
+        self.wait_for_task(panel)
+        original_ends = [entry.options.background_end for entry in panel.plan.entries]
+        self.assertGreater(len(set(original_ends)), 1)
+        panel.table.setCurrentCell(1, 0)
+        with patch("app.background_editor.QColorDialog.getColor", return_value=QColor("#ff0000")):
+            editor.start_button.click()
+        self.assertFalse(panel.busy)
+        self.assertIsNotNone(panel.plan)
+        self.assertEqual(panel.table.rowCount(), 3)
+        self.assertEqual(panel.table.currentRow(), 1)
+        self.assertTrue(panel.convert_button.isEnabled())
+        self.assertEqual([entry.options.background_end for entry in panel.plan.entries], original_ends)
+        for row, entry in enumerate(panel.plan.entries):
+            self.assertEqual(entry.options.background, "#ff0000")
+            self.assertEqual(entry.options.background_mode, "Radial gradient")
+            center = panel.table.item(row, 0).icon().pixmap(56, 56).toImage().pixelColor(28, 28)
+            self.assertGreaterEqual(center.red(), 249)
+            self.assertLessEqual(center.green(), 6)
+            self.assertLessEqual(center.blue(), 6)
+        panel.convert()
+        self.wait_for_task(panel)
+        for name in ("one.png", "two.png", "three.png"):
+            with Image.open(self.folder / "recolored" / name) as output:
+                center = output.getpixel((128, 128))
+                self.assertGreaterEqual(center[0], 253)
+                self.assertLessEqual(center[1], 3)
+                self.assertLessEqual(center[2], 3)
+
+    def test_random_gradient_presets_save_palette_and_keep_random_style(self):
+        settings = QSettings(str(self.root / "random-presets.ini"), QSettings.IniFormat)
+        editor = BackgroundEditor(settings)
+        editor.setParent(self.window)
+        editor.mode_combo.setCurrentText("Random linear gradient")
+        editor.preset_combo.setCurrentText("Sunset")
+        editor.apply_preset()
+        self.assertEqual(editor.mode_combo.currentText(), "Random linear gradient")
+        self.assertTrue(editor.save_button.isEnabled())
+        with patch("app.background_editor.QInputDialog.getText", return_value=("My random gradient", True)):
+            editor.save_preset()
+        settings.sync()
+        restored = BackgroundEditor(QSettings(str(self.root / "random-presets.ini"), QSettings.IniFormat))
+        restored.setParent(self.window)
+        restored.preset_combo.setCurrentText("My random gradient")
+        restored.apply_preset()
+        self.assertEqual(restored.options().background_distribution, "Random linear gradient")
+        self.assertEqual(restored.options().background, editor.options().background)
+        self.assertEqual(restored.options().background_end, editor.options().background_end)
+
+    def test_add_background_controls_fit_compact_window(self):
+        self.window.mode_tabs.setCurrentIndex(1)
+        panel = self.window.converter
+        panel.operation_combo.setCurrentText("Add background")
+        self.window.resize(740, 600)
+        self.window.show()
+        self.app.processEvents()
+        self.assertLessEqual(panel.minimumSizeHint().width(), 740)
+        self.assertTrue(panel.background_editor.isVisible())
+        self.assertTrue(panel.format_combo.isEnabled())
+        self.assertTrue(panel.remove_existing_check.isVisible())
+        editor = panel.background_editor
+        editor.mode_combo.setCurrentText("Random linear gradient")
+        self.app.processEvents()
+        for widget in (editor.mode_combo, editor.preset_combo, editor.direction_combo):
+            self.assertGreaterEqual(widget.width(), widget.minimumSizeHint().width())
+            self.assertGreaterEqual(widget.height(), 36)
+        for widget in (panel.operation_combo, panel.input_combo, panel.quality_spin):
+            self.assertGreaterEqual(widget.height(), 36)
+        editor.canvas_combo.setCurrentText("Custom")
+        self.app.processEvents()
+        for widget in (editor.canvas_combo, editor.width_spin, editor.height_spin, editor.fit_combo):
+            self.assertGreaterEqual(widget.height(), 36)
+            self.assertGreaterEqual(widget.width(), widget.minimumSizeHint().width())
+            self.assertLessEqual(widget.geometry().bottom(), editor.height())
+        panel.operation_combo.setCurrentText("Remove background")
+        self.assertFalse(editor.isVisible())
+        self.assertFalse(panel.format_combo.isEnabled())
 
     def test_folder_only_preview_can_export_mapping_without_renaming(self):
         self.window.names_input.clear()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
 from threading import Event
 from typing import Callable
 
@@ -14,9 +15,10 @@ from PySide6.QtWidgets import (
 )
 
 from app.workers import TaskWorker
+from app.background_editor import BackgroundEditor
 from services.converter import (
     INPUT_FORMATS, OUTPUT_FORMATS, ConversionOptions, ConversionPlan,
-    ConversionResult, build_conversion_plan, convert_batch,
+    ConversionResult, build_conversion_plan, convert_batch, recolor_plan,
 )
 
 
@@ -41,8 +43,8 @@ class ConversionPanel(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(16)
+        layout.setContentsMargins(24, 8, 24, 8)
+        layout.setSpacing(4)
         title = QLabel("Batch Image Tools")
         title.setObjectName("title")
         layout.addWidget(title)
@@ -67,9 +69,9 @@ class ConversionPanel(QWidget):
 
         options = QGridLayout()
         options.setHorizontalSpacing(12)
-        options.setVerticalSpacing(10)
+        options.setVerticalSpacing(6)
         self.operation_combo = QComboBox()
-        self.operation_combo.addItems(["Convert images", "Remove background"])
+        self.operation_combo.addItems(["Convert images", "Remove background", "Add background"])
         self.input_combo = QComboBox()
         self.input_combo.addItems(INPUT_FORMATS)
         self.format_combo = QComboBox()
@@ -90,6 +92,7 @@ class ConversionPanel(QWidget):
         self.recursive_check = QCheckBox("Include subfolders")
         self.first_frame_check = QCheckBox("First frame")
         self.first_frame_check.setToolTip("Convert only the first frame of animated or multipage images")
+        self.remove_existing_check = QCheckBox("Remove existing background")
         options.addWidget(QLabel("Operation"), 0, 0)
         options.addWidget(self.operation_combo, 0, 1)
         options.addWidget(QLabel("Input"), 0, 2)
@@ -106,6 +109,7 @@ class ConversionPanel(QWidget):
         checks.setSpacing(16)
         checks.addWidget(self.recursive_check)
         checks.addWidget(self.first_frame_check)
+        checks.addWidget(self.remove_existing_check)
         checks.addStretch()
         options.addLayout(checks, 2, 0, 1, 5)
         self.preview_button = self._button("Preview", QStyle.SP_BrowserReload, self.preview)
@@ -113,6 +117,9 @@ class ConversionPanel(QWidget):
         options.setColumnStretch(1, 1)
         options.setColumnStretch(3, 1)
         layout.addLayout(options)
+        self.background_editor = BackgroundEditor(self.settings)
+        self.background_editor.changed.connect(self._background_changed)
+        layout.addWidget(self.background_editor)
 
         self.count_label = QLabel("0 images")
         self.count_label.setObjectName("counts")
@@ -124,6 +131,7 @@ class ConversionPanel(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(False)
         self.table.setIconSize(QSize(48, 48))
+        self.table.itemSelectionChanged.connect(self._preview_selection)
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(60)
         header = self.table.horizontalHeader()
@@ -133,6 +141,7 @@ class ConversionPanel(QWidget):
         header.setSectionResizeMode(3, QHeaderView.Interactive)
         self.table.setColumnWidth(1, 110)
         self.table.setColumnWidth(3, 170)
+        self.table.setMinimumHeight(102)
         layout.addWidget(self.table, 1)
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
@@ -156,13 +165,21 @@ class ConversionPanel(QWidget):
         self.input_widgets = [self.folder_button, self.output_button, self.operation_combo,
                               self.input_combo, self.format_combo, self.quality_spin,
                               self.svg_spin, self.background_button,
-                              self.recursive_check, self.first_frame_check, self.preview_button]
+                              self.recursive_check, self.first_frame_check, self.preview_button,
+                              self.remove_existing_check, self.background_editor]
+        for widget in (self.folder_input, self.output_input, self.operation_combo,
+                       self.input_combo, self.format_combo, self.quality_spin, self.svg_spin):
+            widget.setMinimumHeight(36)
+        for button in (self.folder_button, self.output_button, self.preview_button,
+                       self.cancel_button, self.convert_button):
+            button.setMinimumHeight(34)
         for combo in (self.operation_combo, self.input_combo, self.format_combo):
             combo.currentIndexChanged.connect(self.invalidate)
         for spin in (self.quality_spin, self.svg_spin):
             spin.valueChanged.connect(self.invalidate)
-        for check in (self.recursive_check, self.first_frame_check):
+        for check in (self.recursive_check, self.first_frame_check, self.remove_existing_check):
             check.toggled.connect(self.invalidate)
+        self._update_option_states()
 
     def _update_background(self) -> None:
         self.background_button.setStyleSheet(
@@ -183,6 +200,7 @@ class ConversionPanel(QWidget):
         if chosen:
             self.folder_input.setText(chosen)
             self.output_input.setText(str(Path(chosen) / "converted"))
+            self.background_editor.set_preview_image()
             self.settings.setValue("conversion_directory", chosen)
             self.invalidate()
 
@@ -191,6 +209,29 @@ class ConversionPanel(QWidget):
         if chosen:
             self.output_input.setText(chosen)
             self.invalidate()
+
+    def _background_changed(self) -> None:
+        if self.busy:
+            return
+        if self.plan and self.operation_combo.currentText() == "Add background":
+            old = self.plan.options
+            current = self.background_editor.options()
+            updated = replace(old, background=current.background, background_end=current.background_end,
+                              background_mode=current.background_mode,
+                              gradient_direction=current.gradient_direction,
+                              canvas_width=current.canvas_width, canvas_height=current.canvas_height,
+                              canvas_fit=current.canvas_fit,
+                              background_distribution=current.background_distribution,
+                              random_seed=current.random_seed)
+            if (old.background_distribution not in {"Same background", "Random solid"}
+                    and updated.background != old.background
+                    and replace(updated, background=old.background) == old):
+                row = self.table.currentRow()
+                self._show_plan(recolor_plan(self.plan, updated.background))
+                self.table.setCurrentCell(max(0, row), 0)
+                self.convert_button.setEnabled(bool(self.plan and self.plan.ready))
+                return
+        self.invalidate()
 
     def invalidate(self, *_args) -> None:
         self.plan = None
@@ -202,12 +243,23 @@ class ConversionPanel(QWidget):
 
     def _update_option_states(self) -> None:
         removing = self.operation_combo.currentText() == "Remove background"
+        adding = self.operation_combo.currentText() == "Add background"
+        self.background_editor.setVisible(adding)
+        self.remove_existing_check.setVisible(adding)
         self.format_combo.setEnabled(not self.busy and not removing)
         self.quality_spin.setEnabled(not self.busy and not removing
                                      and self.format_combo.currentText() in {"JPG", "WebP", "AVIF"})
-        self.background_button.setEnabled(not self.busy and not removing
+        self.background_button.setEnabled(not self.busy and not removing and not adding
                                           and self.format_combo.currentText() in {"JPG", "BMP"})
-        self.convert_button.setText("Remove backgrounds" if removing else "Convert images")
+        self.convert_button.setText("Add backgrounds" if adding else
+                                    "Remove backgrounds" if removing else "Convert images")
+
+    def _preview_selection(self) -> None:
+        row = self.table.currentRow()
+        if self.plan and 0 <= row < len(self.plan.entries):
+            entry = self.plan.entries[row]
+            self.background_editor.set_preview_image(entry.thumbnail, entry.options,
+                                                     entry.source.relative_to(self.plan.folder).as_posix())
 
     def preview(self) -> None:
         if self.busy:
@@ -218,9 +270,23 @@ class ConversionPanel(QWidget):
         folder = Path(self.folder_input.text())
         output = Path(self.output_input.text())
         removing = self.operation_combo.currentText() == "Remove background"
+        adding = self.operation_combo.currentText() == "Add background"
         output_format = "PNG" if removing else self.format_combo.currentText()
-        options = ConversionOptions(output_format, self.quality_spin.value(), self.background,
-                                    self.svg_spin.value(), self.first_frame_check.isChecked(), removing)
+        background_options = self.background_editor.options()
+        options = ConversionOptions(
+            output_format=output_format, quality=self.quality_spin.value(),
+            background=background_options.background if adding else self.background,
+            svg_width=self.svg_spin.value(), first_frame=self.first_frame_check.isChecked(),
+            remove_background=removing or (adding and self.remove_existing_check.isChecked()),
+            background_mode=background_options.background_mode if adding else "Original",
+            background_end=background_options.background_end,
+            gradient_direction=background_options.gradient_direction,
+            canvas_width=background_options.canvas_width if adding else 0,
+            canvas_height=background_options.canvas_height if adding else 0,
+            canvas_fit=background_options.canvas_fit,
+            background_distribution=background_options.background_distribution if adding else "Same background",
+            random_seed=background_options.random_seed,
+        )
         input_format = self.input_combo.currentText()
         recursive = self.recursive_check.isChecked()
         self.invalidate()
@@ -229,27 +295,44 @@ class ConversionPanel(QWidget):
 
     def _show_plan(self, plan: ConversionPlan) -> None:
         self.plan = plan
+        adding = plan.options.background_mode != "Original"
+        self.table.horizontalHeaderItem(0).setText("Image preview" if adding else "Source image")
+        self.table.horizontalHeaderItem(1).setText("Output size" if adding else "Dimensions")
         self.table.setRowCount(len(plan.entries))
         errors = sum(bool(entry.error) for entry in plan.entries)
         self.count_label.setText(f"{len(plan.entries)} images  |  {errors} errors")
         for row, entry in enumerate(plan.entries):
+            output_size = ((plan.options.canvas_width, plan.options.canvas_height)
+                           if adding and plan.options.canvas_width else entry.dimensions)
             values = (str(entry.source.relative_to(plan.folder)),
-                      f"{entry.dimensions[0]} x {entry.dimensions[1]}",
+                      f"{output_size[0]} x {output_size[1]}",
                       str(entry.target.relative_to(plan.output_folder)), entry.error or "Ready")
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setToolTip(value)
-                if column == 0 and entry.thumbnail:
+                if column == 1 and plan.options.background_mode != "Original":
+                    item.setToolTip(f"Source: {entry.dimensions[0]} x {entry.dimensions[1]}\nOutput: {value}")
+                if column == 3 and entry.options and plan.options.background_mode != "Original":
+                    background = entry.options
+                    item.setToolTip(f"{value}\n{background.background_mode}: {background.background}"
+                                    f" / {background.background_end}\n{background.gradient_description}")
+                if column == 0 and (entry.preview_thumbnail or entry.thumbnail):
                     pixmap = QPixmap()
-                    pixmap.loadFromData(entry.thumbnail)
-                    item.setIcon(QIcon(pixmap))
+                    pixmap.loadFromData(entry.preview_thumbnail or entry.thumbnail)
+                    icon = QIcon(pixmap)
+                    icon.addPixmap(pixmap, QIcon.Selected)
+                    item.setIcon(icon)
                 if column == 3:
                     item.setForeground(QColor("#bb3845" if entry.error else "#18765b"))
                 self.table.setItem(row, column, item)
         self.status_label.setText(" ".join(plan.errors) or
                                   ("Resolve preview errors" if errors else
+                                   "Ready to add backgrounds" if plan.options.background_mode != "Original" else
                                    "Ready to remove backgrounds" if plan.options.remove_background else
                                    "Ready to convert"))
+        if plan.entries:
+            self.table.setCurrentCell(0, 0)
+            self._preview_selection()
 
     def convert(self) -> None:
         if self.busy or not self.plan or not self.plan.ready:
@@ -263,7 +346,8 @@ class ConversionPanel(QWidget):
         if self.plan:
             for row, entry in enumerate(self.plan.entries):
                 item = self.table.item(row, 3)
-                done = "Background removed" if self.plan.options.remove_background else "Converted"
+                done = ("Background added" if self.plan.options.background_mode != "Original" else
+                        "Background removed" if self.plan.options.remove_background else "Converted")
                 status = (done if entry.target in result.outputs else
                           result.errors.get(entry.source, "Not converted"))
                 item.setText(status)
@@ -272,7 +356,8 @@ class ConversionPanel(QWidget):
                     item.setForeground(QColor("#bb3845"))
         self.plan = None
         prefix = "Cancelled. " if result.cancelled else ""
-        action = "Removed backgrounds from" if self.operation_combo.currentText() == "Remove background" else "Converted"
+        action = ("Added backgrounds to" if self.operation_combo.currentText() == "Add background" else
+                  "Removed backgrounds from" if self.operation_combo.currentText() == "Remove background" else "Converted")
         self.status_label.setText(f"{prefix}{action} {len(result.outputs)} images; {len(result.errors)} errors")
 
     def _start_task(self, operation: Callable, on_success: Callable) -> None:
