@@ -1,0 +1,4 @@
+PySide6
+Pillow>=12.0
+pillow-heif>=1.0
+rembg[cpu]>=2.0
